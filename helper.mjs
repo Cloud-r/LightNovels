@@ -5,6 +5,7 @@ import fs from 'fs';
 import puppeteer from 'puppeteer';
 import cheerio from 'cheerio';
 import EPUB from 'epub-gen';
+import inquirer from 'inquirer';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -12,7 +13,7 @@ const __dirname = dirname(__filename);
 const baseUrl = 'https://www.lightnovelworld.com';
 let isTempDirInitialized = false;
 const tempDirPath = path.resolve(__dirname, 'tmpChapters');
-const tempFilePath = path.resolve(tempDirPath, 'tempChapters.txt');
+let tempFilePath;
 
 let page = null;
 /** Generates an instance of the page Puppeteer page */
@@ -53,7 +54,10 @@ export function getContentFromPage(pageContent) {
   const chapterName = $('.titles h2').contents()[0].data;
   const textNodes = $('.chapter-content')
       .contents()
-      .filter((index, element) => element.nodeType === 3);
+      .filter((index, element) => {
+        return element.name === 'p' && !element.attribs.class;
+      })
+      .map((index, el) => el.children[0]);
   let chapterContent = '';
   textNodes.each((index, element) => {
     chapterContent += element.data + '<br /><br />';
@@ -85,14 +89,20 @@ export async function generateEpub(chapters = [], title) {
  * @param {object} data downloaded chapter data
  */
 export function writeToTemp(data) {
-  if (!isTempDirInitialized) initializeTempDir();
+  if (!isTempDirInitialized) initializeTempDir('random');
   const text = JSON.stringify(data) + '||||';
   fs.appendFileSync(tempFilePath, text);
 }
 
-/** Initialize the temp dir */
-export function initializeTempDir() {
+/**
+ * Initialize the temp dir
+ * @param {string} novelName the novel name
+ * @param {string} tempFileName the temp file to add content to
+ *  */
+export function initializeTempDir(novelName, tempFileName) {
+  const fileName = tempFileName || `${novelName}_${new Date().getTime()}.txt`;
   fs.mkdirSync(tempDirPath, {recursive: true});
+  tempFilePath = path.resolve(tempDirPath, fileName);
   isTempDirInitialized = true;
 }
 
@@ -106,4 +116,69 @@ export function monkeyPatchLogger() {
   console.error = (...args) => {
     originalError(new Date().toISOString(), ...args);
   };
+}
+
+/**
+ * @return {Promise<object>} novel url and novel name
+ */
+export async function getNovelInfo() {
+  const newString = 'New Novel';
+  const retryString = 'Retry Old Download';
+  const questions = [
+    {
+      type: 'list',
+      name: 'mode',
+      message: 'Select The Mode',
+      choices: [newString, retryString],
+    },
+    {
+      type: 'input',
+      name: 'novelName',
+      message: 'Novel Name',
+    },
+    {
+      type: 'input',
+      name: 'chapterURL',
+      message: 'First Chapter URL',
+      when: (answers) => {
+        return answers.mode === newString;
+      },
+    },
+    {
+      type: 'input',
+      name: 'tempFileName',
+      message: 'Temp File to use to rebuild data',
+      when: (answers) => {
+        return answers.mode === retryString;
+      },
+    },
+    {
+      type: 'input',
+      name: 'retryChapterURL',
+      message: 'URL of the next chapter to download',
+      when: (answers) => {
+        return answers.mode === retryString;
+      },
+    },
+  ];
+  const {novelName, chapterURL, mode, tempFileName, retryChapterURL} =
+   await inquirer.prompt(questions);
+  const isNewDownload = mode === newString;
+  return {novelName, chapterURL, isNewDownload, tempFileName, retryChapterURL};
+}
+
+/**
+ * @param {string} tempFileName the file to rebuild from
+ * @return {Array} rebuilt files array
+ */
+export function rebuildChapterArray(tempFileName) {
+  console.info('Rebuilding Files');
+  const filePath = path.resolve(tempDirPath, tempFileName);
+  const fileContent = fs.readFileSync(filePath, {encoding: 'utf8'});
+  const fileArray = fileContent.split('||||')
+      .map((content) => {
+        return JSON.parse(content);
+      });
+  console.info('Files rebuild successfully');
+  return fileArray;
 }
