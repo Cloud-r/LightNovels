@@ -25,6 +25,22 @@ async function getPage() {
 }
 
 /**
+ * function to extract the text nodes
+ * @param {Node} node the node to iterate through
+ * @param {Array} accumulator the result array to collect the text node
+ */
+function _extractTextNodes(node, accumulator) {
+  const nodeHasClass = node.attribs ? !!node.attribs.class : false;
+  if (nodeHasClass) return;
+  if (node.nodeType !== 3) {
+    if (!node.children) return;
+    node.children.forEach((node) => _extractTextNodes(node, accumulator));
+  }
+  // no clue why BR nodes are getting appended without this check??
+  if (node.nodeType === 3) accumulator.push(node);
+}
+
+/**
  *  Loads the Html Content for an given URL using puppeteer
  * @param {string} url - url of the page to load
  * @return {Promise<string | null>} Promise object containing the page url
@@ -32,38 +48,35 @@ async function getPage() {
 export async function loadPage(url) {
   console.log('Loading page for the url:', url);
   const pageUrl = `${baseUrl}${url}`;
-  try {
-    const page = await getPage();
-    await page.goto(pageUrl, {waitUntil: 'networkidle2'});
-    return await page.content();
-  } catch (e) {
-    console.error(`Error loading page for the url ${url}`);
-    console.error(e);
-    return null;
-  }
+  const page = await getPage();
+  await page.goto(pageUrl, {waitUntil: 'networkidle2'});
+  return await page.content();
 }
 
 /**
  * Gets the next chapter url and the page content
  * @param {string} pageContent the HTML content to parse through
+ * @param {string} pageURL the url of the current page
  * @return {Array} Containing the next page url and the content
  */
-export function getContentFromPage(pageContent) {
+export function getContentFromPage(pageContent, pageURL) {
+  const textNodes = [];
+  let chapterContent = '';
   const $ = cheerio.load(pageContent);
   const nextPageUrl = $('#input-next-chapter').val();
   const chapterName = $('.titles h2').contents()[0].data;
-  const textNodes = $('.chapter-content')
-      .contents()
-      .filter((index, element) => {
-        return element.name === 'p' && !element.attribs.class;
-      })
-      .map((index, el) => el.children[0]);
-  let chapterContent = '';
-  textNodes.each((index, element) => {
+  const contentNode = $('.chapter-content')[0];
+  contentNode.children.forEach((node) => {
+    _extractTextNodes(node, textNodes);
+  });
+  textNodes.forEach((element) => {
     chapterContent += element.data + '<br /><br />';
   });
   console.log(`Content process for chapter ${chapterName}`);
-  return [nextPageUrl, {title: chapterName, data: chapterContent}];
+  return [
+    nextPageUrl,
+    {title: chapterName, data: chapterContent, url: pageURL},
+  ];
 }
 
 /**
@@ -78,7 +91,7 @@ export async function generateEpub(chapters = [], title) {
   const outputPath = `${outputDirPath}/${title}.epub`;
   const options = {
     title,
-    author: 'dark',
+    author: 'Empyrean',
     content: chapters,
   };
   await new EPUB(options, outputPath).promise;
@@ -90,7 +103,12 @@ export async function generateEpub(chapters = [], title) {
  */
 export function writeToTemp(data) {
   if (!isTempDirInitialized) initializeTempDir('random');
-  const text = JSON.stringify(data) + '||||';
+  let text = '';
+  try {
+    const fileContent = fs.readFileSync(tempFilePath, {encoding: 'utf8'});
+    if (fileContent) text += '||||';
+  } catch {}
+  text += JSON.stringify(data);
   fs.appendFileSync(tempFilePath, text);
 }
 
@@ -161,10 +179,35 @@ export async function getNovelInfo() {
       },
     },
   ];
-  const {novelName, chapterURL, mode, tempFileName, retryChapterURL} =
-   await inquirer.prompt(questions);
+  const {
+    novelName,
+    chapterURL,
+    mode,
+    tempFileName,
+    retryChapterURL,
+  } = await inquirer.prompt(questions);
   const isNewDownload = mode === newString;
-  return {novelName, chapterURL, isNewDownload, tempFileName, retryChapterURL};
+  return {
+    novelName,
+    chapterURL,
+    isNewDownload,
+    tempFileName,
+    retryChapterURL,
+  };
+}
+
+/**
+ * get users input regarding retry
+ * @param {string} chapterUrl the url of the chapter that failed to download
+ */
+export async function getCurrentSessionRetryInfo(chapterUrl) {
+  const question = [{
+    type: 'confirm',
+    name: 'shouldRetry',
+    message: `Failed to Download Chapter - ${chapterUrl}. Retry?`,
+  }];
+  const {shouldRetry} = await inquirer.prompt(question);
+  return shouldRetry;
 }
 
 /**
@@ -175,10 +218,9 @@ export function rebuildChapterArray(tempFileName) {
   console.info('Rebuilding Files');
   const filePath = path.resolve(tempDirPath, tempFileName);
   const fileContent = fs.readFileSync(filePath, {encoding: 'utf8'});
-  const fileArray = fileContent.split('||||')
-      .map((content) => {
-        return JSON.parse(content);
-      });
+  const fileArray = fileContent.split('||||').map((content) => {
+    return JSON.parse(content);
+  });
   console.info('Files rebuild successfully');
   return fileArray;
 }
